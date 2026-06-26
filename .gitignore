@@ -1,0 +1,64 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.pyc
+__pycache__/
+
+# Environment
+.env
+.env.local
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# --- Android (C12BridgeApp) ---
+*.apk
+*.ap_
+*.aab
+
+# Gradle files
+.gradle/
+**/build/
+local.properties
+
+# Gradle cache and lock files
+*.lock
+**/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio navigation editor
+.navigation/
+
+# Android Studio captures folder
+captures/
+
+# Keystore files
+*.jks
+*.keystore
+
+# IML files
+*.iml
+
+# --- Python ---
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# --- Misc ---
+*.bak
+*.tmp
+*.temp

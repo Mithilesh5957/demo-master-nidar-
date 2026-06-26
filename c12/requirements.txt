@@ -1,0 +1,12 @@
+# CRITICAL: Do NOT un-comment these on Jetson. They are pre-installed system packages.
+# Installing them via pip will BREAK GPU acceleration.
+# ultralytics
+# opencv-python
+# numpy
+
+# ultralytics
+lapx
+scipy
+flask
+paho-mqtt
+pymavlink

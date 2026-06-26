@@ -1,0 +1,12 @@
+[
+    {
+        "active": true,
+        "task": "Verifying Physical Drone Arming",
+        "status": "completed"
+    },
+    {
+        "active": true,
+        "task": "Implementing RC Override Control",
+        "status": "completed"
+    }
+]
