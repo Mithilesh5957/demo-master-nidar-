@@ -16,8 +16,8 @@ from pathlib import Path
 from ultralytics import YOLO # AI Model
 YOLO_AVAILABLE = True
 
-# FORCE RTSP OVER TCP (Fixes 'hevc' artifacts/packet loss)
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+# Enforce strict low-latency flags for OpenCV FFmpeg to solve the "high latency" issue
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|analyzeduration;10000|probesize;32000"
 VERSION = "1.2 (Outdoor Mode Enabled)"
 print(f"🚀 SCOUT SCRIPT VERSION: {VERSION} Started at {datetime.now()}")
 
@@ -32,9 +32,9 @@ TOPIC_DETECTIONS = "nidar/scout/detections"  # Human detection topic
 # CAMERA & DETECTION SETTINGS
 # Camera IDs
 CAM_ID_WEBCAM = 0  # USB Webcam
-# C12 Skydroid Gimbal Camera RTSP URLs
-CAM_ID_RGB = "rtsp://192.168.144.108:554/stream=0"       # C12 RGB main stream
-CAM_ID_THERMAL = "rtsp://192.168.144.108:554/stream=1"   # C12 Thermal stream
+# C12 Skydroid Gimbal Camera RTSP URLs (Updated with correct streams)
+CAM_ID_RGB = "rtsp://192.168.144.108:554/stream=1"       # C12 RGB main stream
+CAM_ID_THERMAL = "rtsp://192.168.144.108:555/stream=2"   # C12 Thermal stream
 
 CAMERA_ENABLED = True
 FLASK_PORT = 5001
@@ -1319,10 +1319,10 @@ if __name__ == "__main__":
     # Battery fix param removed (undefined function)
 
     # Load Model ONCE globally
-    print("🧠 Loading AI Model (YOLOv8n for Raspberry Pi 5 - CPU)...")
+    print("🧠 Loading AI Model (YOLOv8s for Raspberry Pi 5 - CPU)...")
     try:
-        model = YOLO("yolov8n.pt")  # Use nano model for CPU performance
-        # Pi 5 has no NVIDIA GPU - run on CPU
+        # Upgraded to yolov8s.pt (Small) instead of nano for better accuracy
+        model = YOLO("yolov8s.pt")  
         print("✅ Model Loaded Successfully (CPU Mode)")
     except Exception as e:
         print(f"❌ Model Load Failed: {e}")
