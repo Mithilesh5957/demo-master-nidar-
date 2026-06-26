@@ -857,7 +857,6 @@ def process_rgb_frame(frame, model, tracker=None, width=1920, height=1080):
         else:
             # Fallback: Simple detection without tracking
             for det in detections:
-                x1, y1, x2, y2, conf, _ = map(int, det[:4]) + [det[4], det[5]]
                 x1, y1, x2, y2 = int(det[0]), int(det[1]), int(det[2]), int(det[3])
                 conf = det[4]
                 
