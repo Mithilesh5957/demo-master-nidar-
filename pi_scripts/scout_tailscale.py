@@ -1005,20 +1005,12 @@ def run_camera_rgb():
         print("🎯 RGB StrongSORT Tracker Ready")
     
     def open_cam():
-        # GStreamer Pipeline (Explicit TCP + Software H265)
-        gst_pipeline = (
-            f"rtspsrc location={CAM_ID_RGB} latency=200 protocols=tcp ! "
-            "rtph265depay ! h265parse ! queue ! avdec_h265 ! videoconvert ! "
-            "video/x-raw, format=BGR ! appsink drop=1"
-        )
-        try:
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            if not cap.isOpened():
-                print("⚠️ GStreamer Failed, trying direct...")
-                cap = cv2.VideoCapture(CAM_ID_RGB)
-            return cap
-        except:
-            return cv2.VideoCapture(CAM_ID_RGB)
+        print(f"📷 Attempting to open RGB RTSP Stream: {CAM_ID_RGB}")
+        # Use FFmpeg explicitly as it's more reliable for RTSP in standard OpenCV builds
+        cap = cv2.VideoCapture(CAM_ID_RGB, cv2.CAP_FFMPEG)
+        # Set buffer size small to reduce latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
     
     cap = open_cam()
     if not cap.isOpened(): cap = DummyCapture(name="NO RGB")
@@ -1044,19 +1036,10 @@ def run_camera_thermal():
     
     # Thermal often 640x480 or 640x512
     def open_cam():
-        gst_pipeline = (
-            f"rtspsrc location={CAM_ID_THERMAL} latency=200 protocols=tcp ! " # type: ignore
-            "rtph265depay ! h265parse ! queue ! avdec_h265 ! videoconvert ! "
-            "video/x-raw, format=BGR ! appsink drop=1"
-        )
-        try:
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            if not cap.isOpened():
-                 print("⚠️ Thermal GStreamer Failed, fallback...")
-                 cap = cv2.VideoCapture(CAM_ID_THERMAL) # type: ignore
-            return cap
-        except:
-             return cv2.VideoCapture(CAM_ID_THERMAL) # type: ignore
+        print(f"📷 Attempting to open Thermal RTSP Stream: {CAM_ID_THERMAL}")
+        cap = cv2.VideoCapture(CAM_ID_THERMAL, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
 
     cap = open_cam()
     if not cap.isOpened(): cap = DummyCapture(color=(0,0,100), w=640, h=480, name="NO THERMAL")
