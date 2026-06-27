@@ -77,16 +77,32 @@ COPTER_MODES = {
     17: 'BRAKE', 18: 'THROW', 19: 'AVOID_ADSB', 20: 'GUIDED_NOGPS'
 }
 
-# --- SKYBROID GIMBAL CONTROL ---
-# --- GIMBAL CONTROL (DISABLED) ---
-# C12 Code removed as per request
-class DummyGimbal:
-    def center(self): pass
-    def look_down_full(self): pass
-    def set_search_angle(self): pass
-    def rotate_pitch(self, speed): pass
-
-skybroid_gimbal = DummyGimbal()
+# --- C12 GIMBAL DRIVER ---
+try:
+    from C12Driver import C12Driver
+    gimbal = C12Driver()
+    GIMBAL_AVAILABLE = True
+    print("✅ C12 Gimbal Driver Loaded")
+except Exception as e:
+    print(f"⚠️ C12 Gimbal Driver failed to load: {e}")
+    GIMBAL_AVAILABLE = False
+    # Fallback dummy so code doesn't crash
+    class DummyGimbal:
+        current_yaw = 0.0
+        current_pitch = 0.0
+        current_roll = 0.0
+        def center(self): pass
+        def look_down(self): pass
+        def goto_angles(self, **kw): pass
+        def set_rates(self, **kw): pass
+        def stop_movement(self): pass
+        def set_mode(self, m): pass
+        def take_photo(self): pass
+        def start_recording(self): pass
+        def stop_recording(self): pass
+        def get_attitude(self): return {'yaw': 0, 'pitch': 0, 'roll': 0, 'active': False}
+        def set_search_angle(self): pass
+    gimbal = DummyGimbal()
 
 # --- MAVLINK CONNECTION ---
 
@@ -1248,6 +1264,26 @@ def on_message(client, userdata, msg):
                     if DRONE_DATA['status'] != 'ARMED': send_arm(); time.sleep(2)
                     drone.set_mode('AUTO')
                     print(f"🔄 MISSION RESUMED from WP {last_wp}")
+            
+            # --- C12 GIMBAL COMMANDS ---
+            elif act == "GIMBAL_GOTO":
+                gimbal.goto_angles(pitch=data.get('pitch', 0), yaw=data.get('yaw', 0))
+            elif act == "GIMBAL_RATE":
+                gimbal.set_rates(pitch_speed=data.get('pitch_speed', 0), yaw_speed=data.get('yaw_speed', 0))
+            elif act == "GIMBAL_STOP":
+                gimbal.stop_movement()
+            elif act == "GIMBAL_CENTER":
+                gimbal.center()
+            elif act == "GIMBAL_DOWN":
+                gimbal.look_down()
+            elif act == "GIMBAL_MODE":
+                gimbal.set_mode(data.get('mode', 'follow'))
+            elif act == "GIMBAL_PHOTO":
+                gimbal.take_photo()
+            elif act == "GIMBAL_REC_START":
+                gimbal.start_recording()
+            elif act == "GIMBAL_REC_STOP":
+                gimbal.stop_recording()
 
         elif data['type'] == "MISSION_UPLOAD":
             print(f"📩 RX MISSION_UPLOAD")
@@ -1333,9 +1369,9 @@ if __name__ == "__main__":
     if ENABLE_THERMAL: threading.Thread(target=run_camera_thermal, daemon=True).start()
     if ENABLE_WEBCAM: threading.Thread(target=run_camera_webcam, daemon=True).start()
     
-    # Init Gimbal (Only if using main cameras)
-    if ENABLE_RGB or ENABLE_THERMAL:
-        threading.Thread(target=skybroid_gimbal.set_search_angle, daemon=True).start()
+    # Init Gimbal (C12 Driver)
+    if GIMBAL_AVAILABLE and (ENABLE_RGB or ENABLE_THERMAL):
+        print("🎯 C12 Gimbal active — controlled via MQTT commands")
 
     # Enforce Battery Monitor
     threading.Thread(target=ensure_battery_monitor, daemon=True).start()
@@ -1483,6 +1519,12 @@ if __name__ == "__main__":
             # Telemetry Broadcast
             if time.time() - last_telem_send >= 0.25:
                 last_telem_send = time.time()
+                # Inject gimbal telemetry into the payload
+                gimbal_att = gimbal.get_attitude()
+                DRONE_DATA['gimbal_yaw'] = gimbal_att['yaw']
+                DRONE_DATA['gimbal_pitch'] = gimbal_att['pitch']
+                DRONE_DATA['gimbal_roll'] = gimbal_att['roll']
+                
                 payload = json.dumps(DRONE_DATA)
                 for c in mqtt_clients:
                      if c.is_connected(): c.publish(TOPIC_TELEM, payload)

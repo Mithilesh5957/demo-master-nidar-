@@ -410,6 +410,105 @@ def clear_targets():
         print(f"❌ Clear targets error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# --- GIMBAL CONTROL ENDPOINTS ---
+
+@app.route('/gimbal/goto', methods=['POST'])
+def gimbal_goto():
+    """Command gimbal to absolute angles."""
+    data = request.json or {}
+    payload = {
+        "type": "COMMAND", "act": "GIMBAL_GOTO",
+        "pitch": data.get('pitch', 0), "yaw": data.get('yaw', 0)
+    }
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps(payload))
+    return jsonify({"status": f"GIMBAL GOTO pitch={data.get('pitch')} yaw={data.get('yaw')}"})
+
+@app.route('/gimbal/rate', methods=['POST'])
+def gimbal_rate():
+    """Set gimbal rate movement."""
+    data = request.json or {}
+    payload = {
+        "type": "COMMAND", "act": "GIMBAL_RATE",
+        "pitch_speed": data.get('pitch_speed', 0),
+        "yaw_speed": data.get('yaw_speed', 0)
+    }
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps(payload))
+    return jsonify({"status": "GIMBAL RATE SET"})
+
+@app.route('/gimbal/stop', methods=['POST'])
+def gimbal_stop():
+    """Stop gimbal movement."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_STOP"}))
+    return jsonify({"status": "GIMBAL STOPPED"})
+
+@app.route('/gimbal/center', methods=['POST'])
+def gimbal_center():
+    """Center gimbal."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_CENTER"}))
+    return jsonify({"status": "GIMBAL CENTERED"})
+
+@app.route('/gimbal/down', methods=['POST'])
+def gimbal_down():
+    """Point gimbal straight down."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_DOWN"}))
+    return jsonify({"status": "GIMBAL DOWN"})
+
+@app.route('/gimbal/mode', methods=['POST'])
+def gimbal_mode():
+    """Set gimbal mode (follow/lock/follow_switch)."""
+    data = request.json or {}
+    payload = {"type": "COMMAND", "act": "GIMBAL_MODE", "mode": data.get('mode', 'follow')}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps(payload))
+    return jsonify({"status": f"GIMBAL MODE {data.get('mode')}"})
+
+@app.route('/gimbal/photo', methods=['POST'])
+def gimbal_photo():
+    """Take photo."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_PHOTO"}))
+    return jsonify({"status": "GIMBAL PHOTO"})
+
+@app.route('/gimbal/record/start', methods=['POST'])
+def gimbal_rec_start():
+    """Start recording."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_REC_START"}))
+    return jsonify({"status": "GIMBAL REC START"})
+
+@app.route('/gimbal/record/stop', methods=['POST'])
+def gimbal_rec_stop():
+    """Stop recording."""
+    data = request.json or {}
+    topic = get_mission_topic(data)
+    mqtt_client.publish(topic, json.dumps({"type": "COMMAND", "act": "GIMBAL_REC_STOP"}))
+    return jsonify({"status": "GIMBAL REC STOP"})
+
+@socketio.on('gimbal_input')
+def handle_gimbal_input(data):
+    """Real-time gimbal rate input from frontend joystick (high frequency)."""
+    try:
+        payload = {
+            "type": "COMMAND", "act": "GIMBAL_RATE",
+            "pitch_speed": data.get('pitch_speed', 0),
+            "yaw_speed": data.get('yaw_speed', 0)
+        }
+        drone_target = data.get('drone', 'scout')
+        topic = TOPICS.get(drone_target, TOPICS['scout'])
+        mqtt_client.publish(topic, json.dumps(payload))
+    except Exception as e:
+        print(f"❌ Gimbal Input Error: {e}")
+
 if __name__ == '__main__':
     # Initialize database connection
     print("🔌 Connecting to MySQL...")
@@ -417,3 +516,4 @@ if __name__ == '__main__':
     
     # allow_unsafe_werkzeug=True is required when using threading mode in Docker
     socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
+

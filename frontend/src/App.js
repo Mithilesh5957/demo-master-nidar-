@@ -1103,7 +1103,7 @@ function App() {
                 </main>
             ) : view === 'camera' ? (
                 <main className="flex-1 bg-slate-50 overflow-hidden">
-                    <CameraView scoutIp={scout.ip || SCOUT_IP} />
+                    <CameraView scoutIp={scout.ip || SCOUT_IP} socket={socket} scoutData={scout} />
                 </main>
             ) : (
                 <main className="flex-1 bg-slate-50 overflow-hidden">

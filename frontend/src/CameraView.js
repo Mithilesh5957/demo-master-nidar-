@@ -1,6 +1,6 @@
-import React from 'react';
+import GimbalControl from './GimbalControl';
 
-const CameraView = ({ scoutIp }) => {
+const CameraView = ({ scoutIp, socket, scoutData }) => {
     return (
         <div className="flex flex-col h-full bg-slate-900 p-4 overflow-hidden">
             <h2 className="text-xl font-bold text-slate-100 mb-4 tracking-wide items-center justify-center flex gap-2">
@@ -46,6 +46,11 @@ const CameraView = ({ scoutIp }) => {
                         <p className="text-slate-200 text-xs font-mono">C12 THERMAL • AI TRACKING</p>
                     </div>
                 </div>
+            </div>
+
+            {/* GIMBAL CONTROL */}
+            <div className="h-64 flex-shrink-0">
+                <GimbalControl socket={socket} scoutData={scoutData} />
             </div>
         </div>
     );
