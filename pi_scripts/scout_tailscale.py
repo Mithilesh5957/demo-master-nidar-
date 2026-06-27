@@ -17,7 +17,7 @@ from ultralytics import YOLO # AI Model
 YOLO_AVAILABLE = True
 
 # Enforce strict low-latency flags for OpenCV FFmpeg to solve the "high latency" issue
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|analyzeduration;10000|probesize;32000"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;discardcorrupt|stimeout;5000000|max_delay;500000"
 VERSION = "1.2 (Outdoor Mode Enabled)"
 print(f"🚀 SCOUT SCRIPT VERSION: {VERSION} Started at {datetime.now()}")
 
@@ -1033,7 +1033,9 @@ def run_camera_rgb():
     while True:
         ret, frame = cap.read()
         if ret:
-            with lock_rgb: frame_rgb = process_rgb_frame(frame, model, tracker, 1920, 1080)
+            processed = process_rgb_frame(frame, model, tracker, 1920, 1080)
+            with lock_rgb: 
+                frame_rgb = processed
         else:
             print("⚠️ RGB Stream Lost... Reconnecting...")
             cap.release(); time.sleep(2); cap = open_cam()
@@ -1063,7 +1065,9 @@ def run_camera_thermal():
         ret, frame = cap.read()
         if ret:
             h, w = frame.shape[:2]
-            with lock_thermal: frame_thermal = process_thermal_frame(frame, model, tracker, w, h)
+            processed = process_thermal_frame(frame, model, tracker, w, h)
+            with lock_thermal: 
+                frame_thermal = processed
         else:
             print("⚠️ Thermal Stream Lost... Reconnecting...")
             cap.release(); time.sleep(2); cap = open_cam()
