@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 
-const IP_ADDRESS = "localhost";
+const IP_ADDRESS = window.location.hostname || "localhost";
 
 const GimbalControl = ({ socket, scoutData }) => {
     // Gimbal state from telemetry

@@ -1,3 +1,9 @@
+import os
+
+# Enforce strict low-latency flags for OpenCV FFmpeg to solve the "high latency" issue
+# MUST BE SET BEFORE IMPORTING CV2
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
 from pymavlink import mavutil
 import paho.mqtt.client as mqtt
 import json
@@ -8,16 +14,12 @@ import numpy as np
 from datetime import datetime
 import math
 from flask import Flask, Response
-import os
 import struct
 import socket
 import subprocess
 from pathlib import Path
 from ultralytics import YOLO # AI Model
 YOLO_AVAILABLE = True
-
-# Enforce strict low-latency flags for OpenCV FFmpeg to solve the "high latency" issue
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;discardcorrupt|stimeout;5000000|max_delay;500000"
 VERSION = "1.2 (Outdoor Mode Enabled)"
 print(f"🚀 SCOUT SCRIPT VERSION: {VERSION} Started at {datetime.now()}")
 
@@ -1031,15 +1033,19 @@ def run_camera_rgb():
     if not cap.isOpened(): cap = DummyCapture(name="NO RGB")
     
     while True:
-        ret, frame = cap.read()
-        if ret:
-            processed = process_rgb_frame(frame, model, tracker, 1920, 1080)
-            with lock_rgb: 
-                frame_rgb = processed
-        else:
-            print("⚠️ RGB Stream Lost... Reconnecting...")
+        try:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                processed = process_rgb_frame(frame, model, tracker, 1920, 1080)
+                with lock_rgb: 
+                    frame_rgb = processed
+            else:
+                print("⚠️ RGB Stream Lost or Invalid... Reconnecting...")
+                cap.release(); time.sleep(2); cap = open_cam()
+                if not cap.isOpened(): time.sleep(1)
+        except Exception as e:
+            print(f"❌ RGB Camera Error: {e}")
             cap.release(); time.sleep(2); cap = open_cam()
-            if not cap.isOpened(): time.sleep(1)
 
 def run_camera_thermal():
     global frame_thermal, model
@@ -1062,16 +1068,20 @@ def run_camera_thermal():
     if not cap.isOpened(): cap = DummyCapture(color=(0,0,100), w=640, h=480, name="NO THERMAL")
     
     while True:
-        ret, frame = cap.read()
-        if ret:
-            h, w = frame.shape[:2]
-            processed = process_thermal_frame(frame, model, tracker, w, h)
-            with lock_thermal: 
-                frame_thermal = processed
-        else:
-            print("⚠️ Thermal Stream Lost... Reconnecting...")
+        try:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                h, w = frame.shape[:2]
+                processed = process_thermal_frame(frame, model, tracker, w, h)
+                with lock_thermal: 
+                    frame_thermal = processed
+            else:
+                print("⚠️ Thermal Stream Lost or Invalid... Reconnecting...")
+                cap.release(); time.sleep(2); cap = open_cam()
+                if not cap.isOpened(): time.sleep(1)
+        except Exception as e:
+            print(f"❌ Thermal Camera Error: {e}")
             cap.release(); time.sleep(2); cap = open_cam()
-            if not cap.isOpened(): time.sleep(1)
 
 def run_camera_webcam():
     global frame_webcam, model
@@ -1146,19 +1156,19 @@ def generate_frames(is_thermal=False):
         if is_thermal == "webcam":
             with lock_webcam:
                 if frame_webcam is not None:
-                    ret, buffer = cv2.imencode('.jpg', frame_webcam)
+                    ret, buffer = cv2.imencode('.jpg', frame_webcam, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 else:
                     ret = False
         elif is_thermal:
             with lock_thermal:
                 if frame_thermal is not None:
-                    ret, buffer = cv2.imencode('.jpg', frame_thermal)
+                    ret, buffer = cv2.imencode('.jpg', frame_thermal, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 else:
                     ret = False
         else:
             with lock_rgb:
                 if frame_rgb is not None:
-                    ret, buffer = cv2.imencode('.jpg', frame_rgb)
+                    ret, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 else:
                     ret = False
         
@@ -1271,9 +1281,9 @@ def on_message(client, userdata, msg):
             
             # --- C12 GIMBAL COMMANDS ---
             elif act == "GIMBAL_GOTO":
-                gimbal.goto_angles(pitch=data.get('pitch', 0), yaw=data.get('yaw', 0))
+                gimbal.goto_angles(pitch=float(data.get('pitch', 0)), yaw=float(data.get('yaw', 0)))
             elif act == "GIMBAL_RATE":
-                gimbal.set_rates(pitch_speed=data.get('pitch_speed', 0), yaw_speed=data.get('yaw_speed', 0))
+                gimbal.set_rates(pitch_speed=float(data.get('pitch_speed', 0)), yaw_speed=float(data.get('yaw_speed', 0)))
             elif act == "GIMBAL_STOP":
                 gimbal.stop_movement()
             elif act == "GIMBAL_CENTER":
