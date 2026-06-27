@@ -2,7 +2,7 @@ import os
 
 # Enforce strict low-latency flags for OpenCV FFmpeg to solve the "high latency" issue
 # MUST BE SET BEFORE IMPORTING CV2
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000|max_delay;500000"
 
 from pymavlink import mavutil
 import paho.mqtt.client as mqtt
