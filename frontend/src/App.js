@@ -32,7 +32,7 @@ const homeIcon = new L.Icon({
 
 // --- Config ---
 const IP_ADDRESS = "localhost"; // Use localhost for local Docker development
-const SCOUT_IP = "100.80.246.90"; // aerovhyn Pi's Tailscale IP
+const SCOUT_IP = "100.108.108.10"; // aerovhyn Pi's Tailscale IP
 const socket = io(`http://${IP_ADDRESS}:5000`);
 
 // --- Helpers ---
