@@ -47,13 +47,14 @@ class C12Driver:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Bind to specific interface if needed (Pi with WiFi + Ethernet)
-        if local_ip:
-            try:
-                self.sock.bind((local_ip, 0))
-                print(f"[C12] Bound UDP to interface {local_ip}")
-            except Exception as e:
-                print(f"[C12] Warning: Could not bind to {local_ip}: {e}")
+        # Bind the primary socket to port 5000 so the Gimbal knows to send telemetry back here.
+        # It must be the exact same socket we use to send the subscription.
+        try:
+            bind_ip = local_ip if local_ip else "0.0.0.0"
+            self.sock.bind((bind_ip, self.GIMBAL_PORT))
+            print(f"[C12] Bound UDP to {bind_ip}:{self.GIMBAL_PORT}")
+        except Exception as e:
+            print(f"[C12] Warning: Could not bind to {local_ip or '0.0.0.0'}:{self.GIMBAL_PORT}: {e}")
         
         # --- State ---
         self.running = True
@@ -74,7 +75,7 @@ class C12Driver:
         self._rate_thread.start()
         
         # Telemetry listener
-        self._recv_sock = None
+        # Start listening thread
         self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listen_thread.start()
         
@@ -176,16 +177,13 @@ class C12Driver:
         Listen for incoming UDP telemetry packets.
         Packet format: #tpUGCrGAC[YAW_HEX:4][PITCH_HEX:4][ROLL_HEX:4][CHECKSUM:2]
         """
-        self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self._recv_sock.bind(("0.0.0.0", self.GIMBAL_PORT))
-            self._recv_sock.settimeout(1.0)
+            self.sock.settimeout(1.0)
             print(f"[C12] Telemetry listener started on port {self.GIMBAL_PORT}")
             
             while self.running:
                 try:
-                    data, addr = self._recv_sock.recvfrom(1024)
+                    data, addr = self.sock.recvfrom(1024)
                     if not data:
                         continue
                     
