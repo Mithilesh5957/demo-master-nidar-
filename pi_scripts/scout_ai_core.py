@@ -120,14 +120,11 @@ class RTSPCapture:
     """
     RTSP video capture optimized for Raspberry Pi 5.
 
-    Uses OpenCV's FFmpeg backend with UDP transport and aggressive
-    low-latency flags. H.265 is decoded in software by FFmpeg's
-    libavcodec, which uses ARM NEON SIMD on the Cortex-A76 cores.
-
-    Features:
-        - Automatic reconnection with exponential backoff
-        - Buffer size = 1 to always get the latest frame
-        - Thread-safe read access
+    Uses OpenCV's FFmpeg backend with TCP transport.
+    Crucially, it uses a background daemon thread to constantly grab frames,
+    ensuring that read() ALWAYS returns the absolute newest frame with zero latency,
+    bypassing the internal FFmpeg buffer which would otherwise cause massive lag
+    when running slow YOLO inference.
     """
 
     def __init__(self, rtsp_url: str, name: str = "stream"):
@@ -138,10 +135,19 @@ class RTSPCapture:
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 30.0
         self._frame_count = 0
+        self._last_read_count = -1
+        
+        self._latest_frame = None
+        self._running = False
+        self._grab_thread = None
 
     def open(self) -> bool:
-        """Open the RTSP stream via FFmpeg."""
+        """Open the RTSP stream via FFmpeg and start grabber thread."""
         with self._lock:
+            self._running = False
+            if self._grab_thread:
+                self._grab_thread.join(timeout=2.0)
+                
             if self.cap is not None:
                 try:
                     self.cap.release()
@@ -158,26 +164,44 @@ class RTSPCapture:
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 log.info(f"[{self.name}] ✅ Stream opened ({w}x{h})")
+                
+                # Start zero-latency grabber thread
+                self._running = True
+                self._grab_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                self._grab_thread.start()
                 return True
 
             log.error(f"[{self.name}] ❌ Failed to open stream")
             self.cap = None
             return False
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """Read a single frame. Thread-safe."""
-        with self._lock:
+    def _reader_loop(self):
+        """Background thread that aggressively clears the buffer."""
+        while self._running:
             if self.cap is None or not self.cap.isOpened():
-                return False, None
+                time.sleep(0.1)
+                continue
+                
             try:
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
-                    self._frame_count += 1
-                    return True, frame
-                return False, None
+                    with self._lock:
+                        self._latest_frame = frame
+                        self._frame_count += 1
+                else:
+                    time.sleep(0.01)
             except Exception as e:
-                log.error(f"[{self.name}] Read error: {e}")
-                return False, None
+                log.error(f"[{self.name}] Reader thread error: {e}")
+                time.sleep(0.1)
+
+    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        """Return the absolute latest frame instantly, ONLY if it's new."""
+        with self._lock:
+            if self._latest_frame is not None and self._frame_count > self._last_read_count:
+                self._last_read_count = self._frame_count
+                frame = self._latest_frame.copy()
+                return True, frame
+            return False, None
 
     def reconnect(self) -> bool:
         """Reconnect with exponential backoff."""
@@ -194,6 +218,10 @@ class RTSPCapture:
 
     def release(self):
         """Release the capture device."""
+        self._running = False
+        if self._grab_thread:
+            self._grab_thread.join(timeout=2.0)
+            
         with self._lock:
             if self.cap is not None:
                 try:
@@ -201,6 +229,7 @@ class RTSPCapture:
                 except Exception:
                     pass
                 self.cap = None
+                self._latest_frame = None
                 log.info(f"[{self.name}] Released")
 
     def is_opened(self) -> bool:

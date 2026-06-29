@@ -691,17 +691,22 @@ def run_ai_pipeline():
     
     global frame_rgb, frame_thermal
     
+    current_tracks = []
+    
     while True:
         try:
             # Reconnect logic
             if ENABLE_RGB and not rgb_cap.is_opened(): rgb_cap.reconnect()
             if ENABLE_THERMAL and not thermal_cap.is_opened(): thermal_cap.reconnect()
             
-            # Read streams
+            # Read streams (returns instantly, False if no NEW frame)
             rgb_ok, rgb = rgb_cap.read() if ENABLE_RGB else (False, None)
             thm_ok, thm = thermal_cap.read() if ENABLE_THERMAL else (False, None)
             
-            if rgb is not None:
+            if thm_ok and thm is not None:
+                with lock_thermal: frame_thermal = thm
+            
+            if rgb_ok and rgb is not None:
                 frame_counter += 1
                 if frame_counter % skip == 0 and detector.is_available:
                     # AI Pipeline
@@ -714,18 +719,14 @@ def run_ai_pipeline():
                         for t in tracks: t["thermal_confirmed"] = False
                     
                     locked_ids = lock_mgr.update(tracks)
+                    current_tracks = tracks
                     
-                    # Annotate
-                    annotated = FrameAnnotator.annotate(rgb, tracks, lock_mgr, get_drone_state())
-                    with lock_rgb: frame_rgb = annotated
-                else:
-                    # Raw frame if skipping AI
-                    with lock_rgb: frame_rgb = rgb
+                # Annotate EVERY frame with latest tracks (zero lag video!)
+                annotated = FrameAnnotator.annotate(rgb, current_tracks, lock_mgr, get_drone_state())
+                with lock_rgb: frame_rgb = annotated
             else:
+                # Sleep slightly to prevent CPU spin if camera is disconnected or at max FPS
                 time.sleep(0.01)
-                
-            if thm is not None:
-                with lock_thermal: frame_thermal = thm
                 
         except Exception as e:
             print(f"AI Pipeline Error: {e}")
