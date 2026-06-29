@@ -18,7 +18,13 @@ import struct
 import socket
 import subprocess
 from pathlib import Path
-from ultralytics import YOLO # AI Model
+
+from scout_ai_core import (
+    ScoutConfig, RTSPCapture, DetectionEngine, TrackerManager, 
+    ThermalValidator, TargetLockManager, DroneState, 
+    calculate_target_ground_gps, FrameAnnotator
+)
+
 YOLO_AVAILABLE = True
 VERSION = "1.2 (Outdoor Mode Enabled)"
 print(f"🚀 SCOUT SCRIPT VERSION: {VERSION} Started at {datetime.now()}")
@@ -558,63 +564,6 @@ def handle_takeoff_command(alt):
     except Exception as e:
         print(f"❌ TAKEOFF Error: {e}")
 
-# --- GEOLOCATION MATH ---
-def get_target_gps(drone_lat, drone_lon, alt, heading, x_pixel, y_pixel, img_w, img_h, drone_pitch=0):
-    """
-    Calculate the precise GPS coordinates of a target on the ground using 
-    drone telemetry and pixel position.
-    Assumes flat ground.
-    Added Drone Pitch compensation for fixed cameras.
-    """
-    if alt <= 0: return drone_lat, drone_lon # Fallback if on ground
-    
-    # Camera Params (Approximate for SIYI A8/C12 at 1x Zoom)
-    H_FOV = 65.0 # Horizontal FOV in degrees
-    V_FOV = 50.0 # Vertical FOV in degrees
-    
-    # Calculate angular offsets from center
-    x_offset_deg = ((x_pixel - (img_w / 2)) / (img_w / 2)) * (H_FOV / 2)
-    y_offset_deg = ((y_pixel - (img_h / 2)) / (img_h / 2)) * (V_FOV / 2)
-    
-    # Gimbal Pitch (Fixed Webcam) + Drone Pitch (critical for fixed cameras)
-    # If drone pitches down (negative), camera looks further down (steeper/negative)
-    # We want effective pitch relative to HORIZON.
-    # Camera is mounted at -45 (down).
-    # Drone pitch is typically negative when flying forward.
-    # Effective angle = Camera Mount + Drone Pitch
-    effective_pitch = CAMERA_PITCH_DEG + drone_pitch
-    
-    # Target pitch = Effective Pitch - Y_offset
-    # We want absolute angle from horizon (postive value)
-    target_pitch_deg = abs(effective_pitch + y_offset_deg) 
-    
-    # Clamp pitch to avoid div by zero (infinity distance at horizon)
-    if target_pitch_deg < 5: target_pitch_deg = 5
-    if target_pitch_deg > 89: target_pitch_deg = 89
-    
-    # Ground Distance (d = h * tan(theta))
-    ground_dist = alt / math.tan(math.radians(target_pitch_deg))
-    
-    # Target Bearing (Drone Heading + X Offset)
-    target_bearing = (heading + x_offset_deg) % 360
-    
-    # Geodetic Calculation (Simple flat-earth approximation for short distances)
-    R = 6378137.0 # Earth Radius
-    
-    # Convert to radians
-    lat1 = math.radians(drone_lat)
-    lon1 = math.radians(drone_lon)
-    brng = math.radians(target_bearing)
-    
-    lat2 = math.asin(math.sin(lat1)*math.cos(ground_dist/R) +
-                     math.cos(lat1)*math.sin(ground_dist/R)*math.cos(brng))
-                     
-    lon2 = lon1 + math.atan2(math.sin(brng)*math.sin(ground_dist/R)*math.cos(lat1),
-                             math.cos(ground_dist/R)-math.sin(lat1)*math.sin(lat2))
-    
-    return math.degrees(lat2), math.degrees(lon2)
-
-# --- DETECTION AND DUPLICATION LOGIC ---
 def is_duplicate_detection(lat, lon):
     """Check if this location was recently detected - strict filtering to prevent duplicates."""
     global DETECTIONS, LAST_DETECTION_TIME
@@ -680,486 +629,114 @@ def mark_detection(target_lat, target_lon, source="rgb", conf=0.0):
     
     return True
 
-# --- YOLO SETUP ---
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    print("⚠️ Ultralytics/YOLO not found. Video Only.")
-    YOLO_AVAILABLE = False
+# --- AI CORE INTEGRATION ---
 
-# --- STRONGSORT TRACKING SETUP (Scout Plan) ---
-STRONGSORT_AVAILABLE = False
-tracker_rgb = None
-tracker_thermal = None
+# Initialize AI Components
+ai_config = ScoutConfig(
+    rgb_url=CAM_ID_RGB,
+    thermal_url=CAM_ID_THERMAL,
+    model_path="yolov8n.pt",  # Pi 5 Optimized
+    inference_size=320
+)
 
-try:
-    from boxmot import StrongSORT # type: ignore
-    STRONGSORT_AVAILABLE = True
-    print("✅ StrongSORT tracking available")
-except ImportError:
-    print("⚠️ boxmot not found. Falling back to simple detection.")
-    print("   Install with: pip install boxmot lap")
+rgb_cap = RTSPCapture(ai_config.rgb_url, "RGB")
+thermal_cap = RTSPCapture(ai_config.thermal_url, "Thermal")
 
-# Track state management
-CONFIRMED_TRACKS = {}  # {track_id: {"hits": N, "gps": (lat, lon), "helmet": bool, "source": str}}
-THERMAL_CANDIDATES = {}  # Thermal-detected tracks waiting for RGB confirmation
-RGB_CONFIRMED_IDS = set()  # Track IDs confirmed by RGB with helmet
+detector = DetectionEngine(model_path=ai_config.model_path, imgsz=ai_config.inference_size)
+tracker = TrackerManager(max_age=ai_config.track_max_age, min_hits=ai_config.track_min_hits)
+thermal_val = ThermalValidator()
 
-def init_tracker(device='cpu'):
-    """Initialize StrongSORT tracker."""
-    if not STRONGSORT_AVAILABLE:
-        return None
-    try:
-        tracker = StrongSORT(
-            model_weights=Path('osnet_x0_25_msmt17.pt'),  # Lightweight ReID model
-            device=device,
-            fp16=False,  # No FP16 on CPU
-            max_age=TRACK_MAX_AGE,
-            n_init=3,  # Frames before track is confirmed
-        )
-        print(f"🎯 StrongSORT Tracker initialized on {device}")
-        return tracker
-    except Exception as e:
-        print(f"⚠️ StrongSORT init failed: {e}")
-        return None
-
-def detect_yellow_helmet(frame, bbox):
-    """
-    Detect yellow helmet in the head region of a person bounding box.
-    Returns True if yellow helmet detected, False otherwise.
-    """
-    if not HELMET_DETECTION_ENABLED:
-        return False
-    
-    try:
-        x1, y1, x2, y2 = map(int, bbox)
-        
-        # Ensure valid coordinates
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        
-        # Extract head region (top 30% of bounding box)
-        head_height = int((y2 - y1) * 0.3)
-        head_region = frame[y1:y1+head_height, x1:x2]
-        
-        if head_region.size == 0:
-            return False
-        
-        # Convert to HSV and detect yellow
-        hsv = cv2.cvtColor(head_region, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, HELMET_HSV_LOW, HELMET_HSV_HIGH)
-        yellow_pixels = cv2.countNonZero(mask)
-        
-        return yellow_pixels >= HELMET_MIN_PIXELS
-    except Exception as e:
-        return False
-
-def is_track_confirmed(track_id):
-    """Check if a track has been confirmed (seen for enough frames)."""
-    if track_id not in CONFIRMED_TRACKS:
-        return False
-    return CONFIRMED_TRACKS[track_id]["hits"] >= TRACK_CONFIRMATION_FRAMES
-
-def update_track_state(track_id, lat, lon, helmet, source):
-    """Update or create track state."""
-    global CONFIRMED_TRACKS
-    
-    if track_id not in CONFIRMED_TRACKS:
-        CONFIRMED_TRACKS[track_id] = {
-            "hits": 1,
-            "gps": (lat, lon),
-            "helmet": helmet,
-            "source": source,
-            "marked": False  # Whether GPS marker was created
-        }
-    else:
-        CONFIRMED_TRACKS[track_id]["hits"] += 1
-        CONFIRMED_TRACKS[track_id]["gps"] = (lat, lon)  # Update GPS
-        if helmet:
-            CONFIRMED_TRACKS[track_id]["helmet"] = True  # Keep helmet=True once detected
-
-def load_yolo_model():
-    if not YOLO_AVAILABLE: return None
-    try:
-        print("🧠 Loading AI Model (YOLOv8m for Jetson Orin)...")
-        model = YOLO('yolov8m.pt') 
-        if hasattr(model, 'overrides'): model.overrides['imgsz'] = 1280
-        return model
-    except Exception as e:
-        print(f"❌ AI Init Error: {e}")
-        return None
-
-def process_rgb_frame(frame, model, tracker=None, width=1920, height=1080):
-    """
-    Process RGB frame with StrongSORT tracking and helmet detection.
-    Scout Plan: Persistent IDs, Yellow Helmet Detection, Track Confirmation.
-    """
-    global CONFIRMED_TRACKS, RGB_CONFIRMED_IDS
-    
-    if model is None: 
-        return frame
-    
-    inference_frame = frame.copy()
-    det_conf = DETECTION_CONFIDENCE
-    
-    try:
-        results = model(inference_frame, imgsz=1280, verbose=False)
-        
-        # Collect all person detections for tracker
-        detections = []
-        for result in results:
-            for box in result.boxes:
-                if int(box.cls[0]) == 0 and float(box.conf[0]) >= det_conf:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf[0])
-                    detections.append([x1, y1, x2, y2, conf, 0])  # cls=0 for person
-        
-        # Use StrongSORT tracker if available
-        if tracker is not None and len(detections) > 0:
-            dets_array = np.array(detections)
-            tracks = tracker.update(dets_array, inference_frame)
-            
-            for track in tracks:
-                x1, y1, x2, y2, track_id = int(track[0]), int(track[1]), int(track[2]), int(track[3]), int(track[4])
-                conf = track[5] if len(track) > 5 else 0.5
-                
-                # Detect yellow helmet
-                has_helmet = detect_yellow_helmet(frame, (x1, y1, x2, y2))
-                
-                # Calculate GPS
-                cx, cy = (x1+x2)/2, (y1+y2)/2
-                t_lat, t_lon = get_target_gps(
-                    DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
-                    cx, cy, width, height
-                )
-                
-                # Update track state
-                update_track_state(track_id, t_lat, t_lon, has_helmet, "rgb")
-                
-                # Draw bounding box with track ID
-                color = (0, 255, 255) if has_helmet else (0, 255, 0)  # Yellow if helmet, Green otherwise
-                cv2.rectangle(inference_frame, (x1, y1), (x2, y2), color, 2)
-                
-                # Status text
-                helmet_str = "🎓" if has_helmet else ""
-                confirmed_str = "✓" if is_track_confirmed(track_id) else ""
-                label = f'ID:{track_id} {helmet_str}{confirmed_str} {conf*100:.0f}%'
-                cv2.putText(inference_frame, label, (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                
-                # Mark detection ONLY when track is confirmed AND (has helmet OR fusion disabled)
-                if DRONE_DATA['lat'] != 0 and is_track_confirmed(track_id):
-                    track_data = CONFIRMED_TRACKS.get(track_id, {})
-                    
-                    # Fusion mode: Only mark if helmet detected OR fusion disabled
-                    should_mark = False
-                    if FUSION_MODE:
-                        if has_helmet or track_data.get("helmet", False):
-                            should_mark = True
-                            RGB_CONFIRMED_IDS.add(track_id)
-                    else:
-                        should_mark = True
-                    
-                    if should_mark and not track_data.get("marked", False):
-                        is_new = mark_detection(t_lat, t_lon, "rgb_tracked", conf)
-                        if is_new:
-                            CONFIRMED_TRACKS[track_id]["marked"] = True
-                            cv2.putText(inference_frame, "NEW TARGET", (x1, y1-30), 0, 0.7, (0,255,255), 2)
-                
-                # Overlay GPS
-                cv2.putText(inference_frame, f"{t_lat:.5f},{t_lon:.5f}", (x1, y2+15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255), 1)
-        
-        else:
-            # Fallback: Simple detection without tracking
-            for det in detections:
-                x1, y1, x2, y2 = int(det[0]), int(det[1]), int(det[2]), int(det[3])
-                conf = det[4]
-                
-                cv2.rectangle(inference_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(inference_frame, f'Human {conf*100:.0f}%', (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                
-                cx, cy = (x1+x2)/2, (y1+y2)/2
-                t_lat, t_lon = get_target_gps(
-                    DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
-                    cx, cy, width, height
-                )
-                
-                if DRONE_DATA['lat'] != 0:
-                    is_new = mark_detection(t_lat, t_lon, "rgb", conf)
-                    if is_new:
-                        cv2.putText(inference_frame, "NEW TARGET", (x1, y1-30), 0, 0.5, (0,255,255), 2)
-                
-                cv2.putText(inference_frame, f"{t_lat:.5f},{t_lon:.5f}", (x1, y1+20), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
-        
-        return inference_frame
-    except Exception as e:
-        print(f"RGB Infer Err: {e}")
-        return frame
-
-
-def process_thermal_frame(frame, model, tracker=None, width=640, height=512):
-    """
-    Process Thermal frame with StrongSORT tracking.
-    Scout Plan: Primary detection source for heat signatures.
-    """
-    global THERMAL_CANDIDATES
-    
-    if model is None: 
-        return frame
-    
-    # Thermal Optimization: Invert for better YOLO detection
-    inference_frame = cv2.bitwise_not(frame)
-    det_conf = 0.25  # Lower threshold for thermal
-    display_frame = frame.copy()
-    
-    try:
-        results = model(inference_frame, imgsz=1280, verbose=False)
-        
-        # Collect all person detections
-        detections = []
-        for result in results:
-            for box in result.boxes:
-                if int(box.cls[0]) == 0 and float(box.conf[0]) >= det_conf:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf[0])
-                    detections.append([x1, y1, x2, y2, conf, 0])
-        
-        # Use StrongSORT tracker if available
-        if tracker is not None and len(detections) > 0:
-            dets_array = np.array(detections)
-            tracks = tracker.update(dets_array, inference_frame)
-            
-            for track in tracks:
-                x1, y1, x2, y2, track_id = int(track[0]), int(track[1]), int(track[2]), int(track[3]), int(track[4])
-                conf = track[5] if len(track) > 5 else 0.5
-                
-                # Calculate GPS
-                cx, cy = (x1+x2)/2, (y1+y2)/2
-                t_lat, t_lon = get_target_gps(
-                    DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
-                    cx, cy, width, height
-                )
-                
-                # Update thermal candidates (for fusion with RGB)
-                THERMAL_CANDIDATES[track_id] = {
-                    "gps": (t_lat, t_lon),
-                    "conf": conf,
-                    "timestamp": time.time()
-                }
-                
-                # Draw on display frame (original, not inverted)
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                
-                confirmed_str = "✓" if is_track_confirmed(track_id) else ""
-                label = f'T-ID:{track_id} {confirmed_str} {conf*100:.0f}%'
-                cv2.putText(display_frame, label, (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                
-                # In non-fusion mode, mark thermal detections directly
-                if not FUSION_MODE and DRONE_DATA['lat'] != 0 and is_track_confirmed(track_id):
-                    is_new = mark_detection(t_lat, t_lon, "thermal_tracked", conf)
-                    if is_new:
-                        cv2.putText(display_frame, "NEW TARGET", (x1, y1-25), 0, 0.5, (0,255,255), 2)
-                
-                cv2.putText(display_frame, f"{t_lat:.5f},{t_lon:.5f}", (x1, y2+12), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255), 1)
-        
-        else:
-            # Fallback: Simple detection without tracking
-            for det in detections:
-                x1, y1, x2, y2 = int(det[0]), int(det[1]), int(det[2]), int(det[3])
-                conf = det[4]
-                
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(display_frame, f'Human {conf*100:.0f}%', (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                
-                cx, cy = (x1+x2)/2, (y1+y2)/2
-                t_lat, t_lon = get_target_gps(
-                    DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
-                    cx, cy, width, height
-                )
-                
-                if DRONE_DATA['lat'] != 0:
-                    is_new = mark_detection(t_lat, t_lon, "thermal", conf)
-                    if is_new:
-                        cv2.putText(display_frame, "NEW TARGET", (x1, y1-30), 0, 0.5, (0,255,255), 2)
-                
-                cv2.putText(display_frame, f"{t_lat:.5f},{t_lon:.5f}", (x1, y1+20), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
-        
-        return display_frame
-    except Exception as e:
-        print(f"Thermal Infer Err: {e}")
-        return frame
-
-# --- CAMERA THREADS ---
-class DummyCapture:
-    def __init__(self, color=(100,100,100), w=1920, h=1080, name="NO CAM"): 
-        self.color = color; self.w=w; self.h=h; self.name=name
-    def isOpened(self): return True
-    def read(self):
-        img = np.zeros((self.h, self.w, 3), np.uint8)
-        img[:] = self.color
-        cv2.putText(img, self.name, (100, 100), 0, 2, (255,255,255), 3)
-        time.sleep(0.1)
-        return True, img
-    def release(self): pass
-
-def run_camera_rgb():
-    global frame_rgb, model
-    print(f"📷 Init RGB Camera ({CAM_ID_RGB})...")
-    # model = load_yolo_model() # Use global model
-    
-    # Initialize StrongSORT tracker for RGB (Scout Plan)
-    tracker = init_tracker(device='cpu')
-    if tracker:
-        print("🎯 RGB StrongSORT Tracker Ready")
-    
-    def open_cam():
-        print(f"📷 Attempting to open RGB RTSP Stream: {CAM_ID_RGB}")
-        # Use FFmpeg explicitly as it's more reliable for RTSP in standard OpenCV builds
-        cap = cv2.VideoCapture(CAM_ID_RGB, cv2.CAP_FFMPEG)
-        # Set buffer size small to reduce latency
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
-    
-    cap = open_cam()
-    if not cap.isOpened(): cap = DummyCapture(name="NO RGB")
-    
-    while True:
-        try:
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                processed = process_rgb_frame(frame, model, tracker, 1920, 1080)
-                with lock_rgb: 
-                    frame_rgb = processed
-            else:
-                print("⚠️ RGB Stream Lost or Invalid... Reconnecting...")
-                cap.release(); time.sleep(2); cap = open_cam()
-                if not cap.isOpened(): time.sleep(1)
-        except Exception as e:
-            print(f"❌ RGB Camera Error: {e}")
-            cap.release(); time.sleep(2); cap = open_cam()
-
-def run_camera_thermal():
-    global frame_thermal, model
-    print(f"📷 Init Thermal Camera ({CAM_ID_THERMAL})...")
-    # model = load_yolo_model() # Use global model
-    
-    # Initialize StrongSORT tracker for Thermal (Scout Plan)
-    tracker = init_tracker(device='cpu')
-    if tracker:
-        print("🎯 Thermal StrongSORT Tracker Ready")
-    
-    # Thermal often 640x480 or 640x512
-    def open_cam():
-        print(f"📷 Attempting to open Thermal RTSP Stream: {CAM_ID_THERMAL}")
-        cap = cv2.VideoCapture(CAM_ID_THERMAL, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
-
-    cap = open_cam()
-    if not cap.isOpened(): cap = DummyCapture(color=(0,0,100), w=640, h=480, name="NO THERMAL")
-    
-    while True:
-        try:
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                h, w = frame.shape[:2]
-                processed = process_thermal_frame(frame, model, tracker, w, h)
-                with lock_thermal: 
-                    frame_thermal = processed
-            else:
-                print("⚠️ Thermal Stream Lost or Invalid... Reconnecting...")
-                cap.release(); time.sleep(2); cap = open_cam()
-                if not cap.isOpened(): time.sleep(1)
-        except Exception as e:
-            print(f"❌ Thermal Camera Error: {e}")
-            cap.release(); time.sleep(2); cap = open_cam()
-
-def run_camera_webcam():
-    global frame_webcam, model
-    # Check if webcam device exists to avoid spamming warnings
-    webcam_dev = f"/dev/video{CAM_ID_WEBCAM}" if isinstance(CAM_ID_WEBCAM, int) else CAM_ID_WEBCAM
-    if not os.path.exists(webcam_dev) and isinstance(CAM_ID_WEBCAM, int):
-        print(f"⚠️ USB Webcam not found at {webcam_dev}. Skipping webcam thread.")
+def on_lock(track_id, bbox, conf):
+    """Callback when TargetLockManager confirms a target."""
+    if DRONE_DATA['lat'] == 0:
         return
+    x1, y1, x2, y2 = bbox
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    
+    t_lat, t_lon = calculate_target_ground_gps(
+        DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
+        DRONE_DATA.get('pitch', 0), DRONE_DATA.get('gimbal_yaw', 0),
+        cx, cy, 1920.0, 1080.0,  # Assuming RGB 1080p
+        ai_config.camera_fov_h, ai_config.camera_fov_v
+    )
+    
+    is_new = mark_detection(t_lat, t_lon, "ai_core_locked", conf)
+    if is_new:
+        print(f"🎯 AI TARGET LOCKED! ID:{track_id} Conf:{conf:.1%} Loc:({t_lat:.5f}, {t_lon:.5f})")
 
-    print(f"📷 Init USB Webcam ({CAM_ID_WEBCAM})...")
-    cap = cv2.VideoCapture(CAM_ID_WEBCAM)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+lock_mgr = TargetLockManager(lock_frames=30, lock_confidence=0.85, on_lock=on_lock)
+
+# We map DRONE_DATA to DroneState for the annotator
+def get_drone_state():
+    return DroneState(
+        lat=DRONE_DATA.get('lat', 0),
+        lon=DRONE_DATA.get('lon', 0),
+        alt=DRONE_DATA.get('alt', 0),
+        heading=DRONE_DATA.get('heading', 0),
+        speed=DRONE_DATA.get('speed', 0),
+        gps_sats=DRONE_DATA.get('gps_sats', 0),
+        gps_fix=DRONE_DATA.get('gps_fix', 0),
+        mode=DRONE_DATA.get('mode', 'UNKNOWN'),
+        gimbal_pitch=DRONE_DATA.get('pitch', 0),
+        gimbal_yaw=DRONE_DATA.get('gimbal_yaw', 0)
+    )
+
+# The new thread that replaces process_rgb, process_thermal, run_camera_xyz
+def run_ai_pipeline():
+    rgb_cap.open()
+    thermal_cap.open()
+    
+    frame_counter = 0
+    skip = ai_config.process_every_n_frames
+    
+    global frame_rgb, frame_thermal
     
     while True:
-        ret, frame = cap.read()
-        if ret:
-            # Run YOLO Detection if available
-            if YOLO_AVAILABLE and model is not None:
-                try:
-                    # Run inference
-                    results = model(frame, verbose=False, conf=0.4, iou=0.5)
-                    
-                    # Annotate and Extract
-                    for result in results:
-                        frame = result.plot() # Draw boxes
-                        
-                        for box in result.boxes:
-                            # Extract Box
-                            x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-                            conf = float(box.conf[0])
-                            cls = int(box.cls[0])
-                            
-                            # Only Humans (Class 0)
-                            if cls == 0 and conf > 0.4:
-                                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                                h, w, _ = frame.shape
-                                
-                                # Calculate GPS Location
-                                t_lat, t_lon = get_target_gps(
-                                    DRONE_DATA['lat'], DRONE_DATA['lon'], DRONE_DATA['alt'], DRONE_DATA['heading'],
-                                    cx, cy, w, h, DRONE_DATA.get('pitch', 0)
-                                )
-                                
-                                # Draw GPS on Frame
-                                cv2.putText(frame, f"{t_lat:.5f}, {t_lon:.5f}", (x1, y2 + 20), 
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
-
-                                # Mark detection (Save to Global List)
-                                # Only if drone has valid GPS
-                                if DRONE_DATA['lat'] != 0:
-                                    is_new = mark_detection(t_lat, t_lon, "webcam", conf)
-                                    if is_new:
-                                        print(f"🎯 NEW WEBCAM TARGET: {t_lat}, {t_lon}")
-                                        cv2.putText(frame, "NEW TARGET", (x1, y1-30), 0, 0.6, (0,255,0), 2)
-
-                except Exception as e: 
-                    # print(f"Webcam Detection Err: {e}") 
-                    pass
+        try:
+            # Reconnect logic
+            if ENABLE_RGB and not rgb_cap.is_opened(): rgb_cap.reconnect()
+            if ENABLE_THERMAL and not thermal_cap.is_opened(): thermal_cap.reconnect()
             
-            with lock_webcam: frame_webcam = frame
-        else:
-            time.sleep(0.5); cap.release(); cap = cv2.VideoCapture(CAM_ID_WEBCAM)
-            cap.release(); time.sleep(2); cap = cv2.VideoCapture(CAM_ID_WEBCAM)
-            if not cap.isOpened(): time.sleep(1)
+            # Read streams
+            rgb_ok, rgb = rgb_cap.read() if ENABLE_RGB else (False, None)
+            thm_ok, thm = thermal_cap.read() if ENABLE_THERMAL else (False, None)
+            
+            if rgb is not None:
+                frame_counter += 1
+                if frame_counter % skip == 0 and detector.is_available:
+                    # AI Pipeline
+                    dets = detector.detect(rgb)
+                    tracks = tracker.update(dets, rgb)
+                    
+                    if thm is not None:
+                        tracks = thermal_val.validate(tracks, thm, rgb.shape[:2], thm.shape[:2])
+                    else:
+                        for t in tracks: t["thermal_confirmed"] = False
+                    
+                    locked_ids = lock_mgr.update(tracks)
+                    
+                    # Annotate
+                    annotated = FrameAnnotator.annotate(rgb, tracks, lock_mgr, get_drone_state())
+                    with lock_rgb: frame_rgb = annotated
+                else:
+                    # Raw frame if skipping AI
+                    with lock_rgb: frame_rgb = rgb
+            else:
+                time.sleep(0.01)
+                
+            if thm is not None:
+                with lock_thermal: frame_thermal = thm
+                
+        except Exception as e:
+            print(f"AI Pipeline Error: {e}")
+            time.sleep(0.1)
 
 # --- FLASK STREAMING ---
 def generate_frames(is_thermal=False):
-    global frame_rgb, frame_thermal, frame_webcam
+    global frame_rgb, frame_thermal
     while True:
         ret = False
-        if is_thermal == "webcam":
-            with lock_webcam:
-                if frame_webcam is not None:
-                    ret, buffer = cv2.imencode('.jpg', frame_webcam, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                else:
-                    ret = False
-        elif is_thermal:
+        if is_thermal:
             with lock_thermal:
                 if frame_thermal is not None:
                     ret, buffer = cv2.imencode('.jpg', frame_thermal, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -1379,9 +956,9 @@ if __name__ == "__main__":
     
     # Start Camera/Webserver threads
     threading.Thread(target=run_flask, daemon=True).start()
-    if ENABLE_RGB: threading.Thread(target=run_camera_rgb, daemon=True).start()
-    if ENABLE_THERMAL: threading.Thread(target=run_camera_thermal, daemon=True).start()
-    if ENABLE_WEBCAM: threading.Thread(target=run_camera_webcam, daemon=True).start()
+    
+    # Start AI Pipeline instead of legacy threads
+    threading.Thread(target=run_ai_pipeline, daemon=True).start()
     
     # Init Gimbal (C12 Driver)
     if GIMBAL_AVAILABLE and (ENABLE_RGB or ENABLE_THERMAL):
