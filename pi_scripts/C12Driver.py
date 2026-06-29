@@ -208,9 +208,13 @@ class C12Driver:
                     continue
                 except Exception as e:
                     if self.running:
+                        print(f"[C12] Telemetry listener error: {e}")
                         time.sleep(0.5)
         finally:
-            self._recv_sock.close()
+            try:
+                self.sock.close()
+            except Exception:
+                pass
     
     # ========================================
     # RATE CONTROL (Velocity — 50Hz Sender)

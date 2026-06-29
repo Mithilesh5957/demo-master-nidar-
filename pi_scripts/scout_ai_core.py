@@ -34,10 +34,10 @@ import os
 # CRITICAL: Set FFmpeg options BEFORE importing cv2
 # This ensures the C++ backend inherits these flags at module load time
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "rtsp_transport;udp"
+    "rtsp_transport;tcp"
     "|fflags;discardcorrupt+nobuffer"
     "|flags;low_delay"
-    "|stimeout;2000000"
+    "|stimeout;5000000"
     "|max_delay;500000"
 )
 
