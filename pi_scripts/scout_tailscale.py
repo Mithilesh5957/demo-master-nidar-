@@ -100,15 +100,15 @@ except Exception as e:
         current_pitch = 0.0
         current_roll = 0.0
         def center(self): pass
-        def look_down(self): pass
-        def goto_angles(self, **kw): pass
-        def set_rates(self, **kw): pass
+        def look_down_90(self): pass
+        def goto_angles(self, pitch_deg, yaw_deg): pass
+        def set_rates(self, pitch_speed, yaw_speed): pass
         def stop_movement(self): pass
         def set_mode(self, m): pass
         def take_photo(self): pass
         def start_recording(self): pass
         def stop_recording(self): pass
-        def get_attitude(self): return {'yaw': 0, 'pitch': 0, 'roll': 0, 'active': False}
+        def get_current_attitude(self, timeout=0.1): return (0.0, 0.0, 0.0)
         def set_search_angle(self): pass
     gimbal = DummyGimbal()
 
@@ -859,15 +859,15 @@ def on_message(client, userdata, msg):
             
             # --- C12 GIMBAL COMMANDS ---
             elif act == "GIMBAL_GOTO":
-                gimbal.goto_angles(pitch=float(data.get('pitch', 0)), yaw=float(data.get('yaw', 0)))
+                gimbal.goto_angles(float(data.get('pitch', 0)), float(data.get('yaw', 0)))
             elif act == "GIMBAL_RATE":
-                gimbal.set_rates(pitch_speed=float(data.get('pitch_speed', 0)), yaw_speed=float(data.get('yaw_speed', 0)))
+                gimbal.set_rates(float(data.get('pitch_speed', 0)), float(data.get('yaw_speed', 0)))
             elif act == "GIMBAL_STOP":
                 gimbal.stop_movement()
             elif act == "GIMBAL_CENTER":
                 gimbal.center()
             elif act == "GIMBAL_DOWN":
-                gimbal.look_down()
+                gimbal.look_down_90()
             elif act == "GIMBAL_MODE":
                 gimbal.set_mode(data.get('mode', 'follow'))
             elif act == "GIMBAL_PHOTO":
@@ -1112,10 +1112,11 @@ if __name__ == "__main__":
             if time.time() - last_telem_send >= 0.25:
                 last_telem_send = time.time()
                 # Inject gimbal telemetry into the payload
-                gimbal_att = gimbal.get_attitude()
-                DRONE_DATA['gimbal_yaw'] = gimbal_att['yaw']
-                DRONE_DATA['gimbal_pitch'] = gimbal_att['pitch']
-                DRONE_DATA['gimbal_roll'] = gimbal_att['roll']
+                gimbal_att = gimbal.get_current_attitude(timeout=0.05)
+                if gimbal_att:
+                    DRONE_DATA['gimbal_yaw'] = gimbal_att[0]
+                    DRONE_DATA['gimbal_pitch'] = gimbal_att[1]
+                    DRONE_DATA['gimbal_roll'] = gimbal_att[2]
                 
                 payload = json.dumps(DRONE_DATA)
                 for c in mqtt_clients:

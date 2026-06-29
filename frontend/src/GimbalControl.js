@@ -85,12 +85,12 @@ const GimbalControl = ({ socket, scoutData }) => {
         const pos = getJoystickOffset(e, rect);
         setJoystickPos(pos);
 
-        // Start sending rates at 10Hz
+        // Start sending rates at 25Hz (ultra responsive, matching new driver capabilities)
         rateInterval.current = setInterval(() => {
-            const yawSpeed = joystickPos.x * 50;  // ±50°/s max
-            const pitchSpeed = -joystickPos.y * 50; // Inverted: drag up = pitch up
+            const yawSpeed = joystickPos.x * 90;  // ±90°/s max for fast tracking
+            const pitchSpeed = -joystickPos.y * 90; // Inverted: drag up = pitch up
             socket?.emit('gimbal_input', { pitch_speed: pitchSpeed, yaw_speed: yawSpeed, drone: 'scout' });
-        }, 100);
+        }, 40);
     };
 
     const handleJoystickMove = (e) => {
